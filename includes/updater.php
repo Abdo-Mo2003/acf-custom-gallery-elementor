@@ -3,13 +3,8 @@
  * ACFGE_Updater
  *
  * Lightweight self-contained GitHub updater.
- * No external libraries needed.
- *
- * How it works:
- *  - Checks the GitHub releases API for a newer version tag
- *  - If found, hooks into WordPress update system
- *  - WordPress shows the standard "Update Available" notice
- *  - User clicks Update — WordPress downloads the release zip
+ * Uses native PHP rename() instead of WP filesystem
+ * to reliably fix the folder name after update.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -18,16 +13,18 @@ class ACFGE_Updater {
 
     private $plugin_slug;
     private $plugin_file;
+    private $plugin_folder;
     private $github_user;
     private $github_repo;
     private $current_version;
     private $api_url;
     private $cache_key;
-    private $cache_hours = 12; // check for updates every 12 hours
+    private $cache_hours = 12;
 
     public function __construct( $plugin_file, $github_user, $github_repo, $current_version ) {
         $this->plugin_file     = $plugin_file;
         $this->plugin_slug     = plugin_basename( $plugin_file );
+        $this->plugin_folder   = dirname( plugin_basename( $plugin_file ) );
         $this->github_user     = $github_user;
         $this->github_repo     = $github_repo;
         $this->current_version = $current_version;
@@ -36,17 +33,17 @@ class ACFGE_Updater {
 
         add_filter( 'pre_set_site_transient_update_plugins', [ $this, 'check_for_update' ] );
         add_filter( 'plugins_api',                           [ $this, 'plugin_info' ], 20, 3 );
-        add_filter( 'upgrader_post_install',                 [ $this, 'after_install' ], 10, 3 );
+
+        // This fires after the zip is extracted, before files are moved
+        // Using PHP rename() directly — most reliable approach
+        add_filter( 'upgrader_source_selection', [ $this, 'fix_source_folder' ], 10, 4 );
     }
 
     /* ── Fetch latest release info from GitHub ──────────────── */
 
     private function get_release_info() {
-        // Return cached result if fresh
         $cached = get_transient( $this->cache_key );
-        if ( $cached !== false ) {
-            return $cached;
-        }
+        if ( $cached !== false ) return $cached;
 
         $response = wp_remote_get( $this->api_url, [
             'headers' => [
@@ -57,7 +54,6 @@ class ACFGE_Updater {
         ] );
 
         if ( is_wp_error( $response ) || wp_remote_retrieve_response_code( $response ) !== 200 ) {
-            // Cache failure for 1 hour to avoid hammering the API
             set_transient( $this->cache_key, null, HOUR_IN_SECONDS );
             return null;
         }
@@ -69,16 +65,13 @@ class ACFGE_Updater {
             return null;
         }
 
-        // Cache for 12 hours
         set_transient( $this->cache_key, $data, $this->cache_hours * HOUR_IN_SECONDS );
-
         return $data;
     }
 
-    /* ── Get the zip URL from the release assets ────────────── */
+    /* ── Get zip URL ────────────────────────────────────────── */
 
     private function get_zip_url( $release ) {
-        // First look for an attached asset zip (your manually uploaded zip)
         if ( ! empty( $release->assets ) ) {
             foreach ( $release->assets as $asset ) {
                 if ( substr( $asset->name, -4 ) === '.zip' ) {
@@ -86,36 +79,30 @@ class ACFGE_Updater {
                 }
             }
         }
-        // Fallback: GitHub's auto-generated source zip
         return "https://github.com/{$this->github_user}/{$this->github_repo}/archive/refs/tags/{$release->tag_name}.zip";
     }
 
-    /* ── Clean version string (remove leading 'v') ──────────── */
+    /* ── Clean version string ────────────────────────────────── */
 
     private function clean_version( $version ) {
         return ltrim( $version, 'vV' );
     }
 
-    /* ── Hook: check if update is available ─────────────────── */
+    /* ── Hook: inject update into WordPress transient ───────── */
 
     public function check_for_update( $transient ) {
-        if ( empty( $transient->checked ) ) {
-            return $transient;
-        }
+        if ( empty( $transient->checked ) ) return $transient;
 
         $release = $this->get_release_info();
+        if ( empty( $release->tag_name ) ) return $transient;
 
-        if ( empty( $release->tag_name ) ) {
-            return $transient;
-        }
+        $latest = $this->clean_version( $release->tag_name );
 
-        $latest_version = $this->clean_version( $release->tag_name );
-
-        if ( version_compare( $latest_version, $this->current_version, '>' ) ) {
+        if ( version_compare( $latest, $this->current_version, '>' ) ) {
             $transient->response[ $this->plugin_slug ] = (object) [
-                'slug'        => dirname( $this->plugin_slug ),
+                'slug'        => $this->plugin_folder,
                 'plugin'      => $this->plugin_slug,
-                'new_version' => $latest_version,
+                'new_version' => $latest,
                 'url'         => "https://github.com/{$this->github_user}/{$this->github_repo}",
                 'package'     => $this->get_zip_url( $release ),
                 'tested'      => get_bloginfo( 'version' ),
@@ -127,27 +114,19 @@ class ACFGE_Updater {
         return $transient;
     }
 
-    /* ── Hook: show plugin info in the update details popup ─── */
+    /* ── Hook: plugin info popup ────────────────────────────── */
 
     public function plugin_info( $result, $action, $args ) {
-        if ( $action !== 'plugin_information' ) {
-            return $result;
-        }
-        if ( ! isset( $args->slug ) || $args->slug !== dirname( $this->plugin_slug ) ) {
-            return $result;
-        }
+        if ( $action !== 'plugin_information' ) return $result;
+        if ( ! isset( $args->slug ) || $args->slug !== $this->plugin_folder ) return $result;
 
         $release = $this->get_release_info();
-        if ( empty( $release ) ) {
-            return $result;
-        }
-
-        $latest_version = $this->clean_version( $release->tag_name );
+        if ( empty( $release ) ) return $result;
 
         return (object) [
             'name'          => 'ACF Custom Gallery for Elementor',
-            'slug'          => dirname( $this->plugin_slug ),
-            'version'       => $latest_version,
+            'slug'          => $this->plugin_folder,
+            'version'       => $this->clean_version( $release->tag_name ),
             'author'        => $this->github_user,
             'homepage'      => "https://github.com/{$this->github_user}/{$this->github_repo}",
             'download_link' => $this->get_zip_url( $release ),
@@ -160,33 +139,83 @@ class ACFGE_Updater {
         ];
     }
 
-    /* ── Hook: rename folder after install ───────────────────── */
+    /* ── Hook: rename extracted folder using PHP rename() ───── */
     /*
-     * GitHub zips extract to "repo-name-v1.0.0/" but WordPress
-     * expects the folder to match the plugin slug. This renames it.
+     * WordPress extracts the zip to a temp folder first.
+     * We use native PHP rename() here — much more reliable
+     * than $wp_filesystem->move() which needs credentials.
+     *
+     * The extracted folder might be named:
+     *   acf-custom-gallery-elementor         (correct — do nothing)
+     *   acf-custom-gallery-elementor-main    (GitHub Code > Download ZIP)
+     *   acf-custom-gallery-elementor-1.2.0   (some zip tools)
+     *
+     * We rename whatever it is to the correct folder name.
      */
-    public function after_install( $response, $hook_extra, $result ) {
-        global $wp_filesystem;
+    public function fix_source_folder( $source, $remote_source, $upgrader, $hook_extra = [] ) {
 
+        // Only act on our plugin
         if ( ! isset( $hook_extra['plugin'] ) || $hook_extra['plugin'] !== $this->plugin_slug ) {
-            return $response;
+            return $source;
         }
 
-        $install_path    = $result['destination'];
-        $correct_path    = WP_PLUGIN_DIR . '/' . dirname( $this->plugin_slug );
+        $correct_source = trailingslashit( $remote_source ) . $this->plugin_folder . '/';
 
-        if ( $install_path !== $correct_path ) {
-            $wp_filesystem->move( $install_path, $correct_path, true );
-            $result['destination'] = $correct_path;
+        // Already correct — nothing to do
+        if ( trailingslashit( $source ) === $correct_source ) {
+            return $source;
         }
 
-        // Re-activate the plugin after update
-        activate_plugin( $this->plugin_slug );
+        // Use native PHP rename — works without WP filesystem credentials
+        if ( @rename( $source, $correct_source ) ) {
+            return $correct_source;
+        }
 
-        return $result;
+        // rename() failed (possibly cross-device) — try copy + delete
+        if ( $this->copy_dir( $source, $correct_source ) ) {
+            $this->delete_dir( $source );
+            return $correct_source;
+        }
+
+        // All else failed — return original and let WordPress handle it
+        return $source;
     }
 
-    /* ── Clear cache (call this after you publish a release) ── */
+    /* ── Helper: recursively copy a directory ───────────────── */
+
+    private function copy_dir( $src, $dst ) {
+        if ( ! @mkdir( $dst, 0755, true ) && ! is_dir( $dst ) ) {
+            return false;
+        }
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator( $src, RecursiveDirectoryIterator::SKIP_DOTS ),
+            RecursiveIteratorIterator::SELF_FIRST
+        );
+        foreach ( $iterator as $item ) {
+            $target = $dst . DIRECTORY_SEPARATOR . $iterator->getSubPathName();
+            if ( $item->isDir() ) {
+                @mkdir( $target, 0755, true );
+            } else {
+                @copy( $item->getPathname(), $target );
+            }
+        }
+        return true;
+    }
+
+    /* ── Helper: recursively delete a directory ─────────────── */
+
+    private function delete_dir( $dir ) {
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator( $dir, RecursiveDirectoryIterator::SKIP_DOTS ),
+            RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ( $iterator as $item ) {
+            $item->isDir() ? @rmdir( $item->getPathname() ) : @unlink( $item->getPathname() );
+        }
+        @rmdir( $dir );
+    }
+
+    /* ── Clear update cache ──────────────────────────────────── */
 
     public static function clear_cache() {
         global $wpdb;
