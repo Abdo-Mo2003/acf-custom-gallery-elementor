@@ -2,9 +2,9 @@
 /**
  * Plugin Name: ACF Custom Gallery for Elementor
  * Description: Adds a "Gallery (Free)" ACF field type with drag-to-reorder, compatible with Elementor Basic Gallery (free) and Gallery (Pro) via a Dynamic Tag.
- * Version: 1.3.0
+ * Version: 1.3.1
  * Author: Abdo
- * Author URI: https://github.com/Abdo-Mo2003
+ * Author URI: https://github.com/amAbdoMo
  * Text Domain: acf-gallery-elementor
  * Requires at least: 5.9
  * Requires PHP: 7.4
@@ -31,7 +31,7 @@ function acfge_setup_updater() {
 
     new ACFGE_Updater(
         __FILE__,
-        'Abdo-Mo2003',                       // ← your GitHub username
+        'amAbdoMo',                       // ← your GitHub username
         'acf-custom-gallery-elementor',      // ← your GitHub repo name
         ACFGE_VERSION
     );
