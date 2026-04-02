@@ -15,7 +15,7 @@ defined( 'ABSPATH' ) || exit;
 
 define( 'ACFGE_PATH',    plugin_dir_path( __FILE__ ) );
 define( 'ACFGE_URL',     plugin_dir_url( __FILE__ ) );
-define( 'ACFGE_VERSION', '1.3.0' );
+define( 'ACFGE_VERSION', '1.3.1' );
 
 /* ---------------------------------------------------------------
  * 1. AUTO-UPDATES — built-in GitHub updater (no library needed)
@@ -74,4 +74,17 @@ function acfge_register_dynamic_tags( $dynamic_tags_manager ) {
     ] );
 
     $dynamic_tags_manager->register( new ACFGE_Dynamic_Tag_Gallery() );
+}
+
+// ── Clear update cache after plugin updates ───────────────────────────────────
+add_action( 'upgrader_process_complete', 'acfge_clear_cache_after_update', 10, 2 );
+function acfge_clear_cache_after_update( $upgrader, $hook_extra ) {
+    if (
+        isset( $hook_extra['action'], $hook_extra['plugins'] ) &&
+        $hook_extra['action'] === 'update' &&
+        in_array( plugin_basename( __FILE__ ), $hook_extra['plugins'], true )
+    ) {
+        ACFGE_Updater::clear_cache();
+        delete_site_transient( 'update_plugins' );
+    }
 }
